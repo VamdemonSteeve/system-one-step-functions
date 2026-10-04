@@ -1,0 +1,116 @@
+{
+  "Comment": "Classify an incoming message with Laya on SageMaker Serverless. The endpoint returns the action to take; the workflow either escalates via SNS email or drafts a reply with Bedrock.",
+  "QueryLanguage": "JSONata",
+  "StartAt": "ValidateInput",
+  "States": {
+    "ValidateInput": {
+      "Type": "Choice",
+      "Choices": [
+        {
+          "Condition": "{% $exists($states.input.message) and ($type($states.input.message) = 'string' or $type($states.input.message) = 'object') %}",
+          "Next": "ClassifyWithLaya"
+        }
+      ],
+      "Default": "InvalidInput"
+    },
+    "InvalidInput": {
+      "Type": "Fail",
+      "Error": "InvalidInput",
+      "Cause": "Input must contain a 'message' field (string or object)."
+    },
+    "ClassifyWithLaya": {
+      "Type": "Task",
+      "Comment": "SDK integration: SageMaker Runtime InvokeEndpoint. The 'routing' block makes the endpoint return a top-level 'action' object.",
+      "Resource": "arn:aws:states:::aws-sdk:sagemakerruntime:invokeEndpoint",
+      "Arguments": {
+        "EndpointName": "${EndpointName}",
+        "ContentType": "application/json",
+        "Accept": "application/json",
+        "Body": "{% $string({ 'state': $states.input.message, 'questions': { 'route': { 'type': 'choice', 'instructions': 'Can this message be answered with a standard written reply, or does a human need to handle it?', 'criteria': { 'auto_reply': 'routine question or request that a standard written reply can resolve', 'escalate': 'complaint, refund or billing dispute, legal or security issue, threat to cancel, or anything urgent' } } }, 'routing': { 'question': 'route', 'actions': { 'auto_reply': 'bedrock_reply', 'escalate': 'send_email' }, 'min_confidence': ${ConfidenceThreshold}, 'fallback': 'send_email' } }) %}"
+      },
+      "Assign": {
+        "message": "{% $states.input.message %}",
+        "action": "{% $parse($states.result.Body).action %}"
+      },
+      "Output": {},
+      "Retry": [
+        {
+          "Comment": "Serverless cold starts can fail the first call; back off and retry.",
+          "ErrorEquals": ["States.TaskFailed"],
+          "IntervalSeconds": 5,
+          "MaxAttempts": 3,
+          "BackoffRate": 2,
+          "JitterStrategy": "FULL"
+        }
+      ],
+      "Next": "RouteOnAction"
+    },
+    "RouteOnAction": {
+      "Type": "Choice",
+      "Comment": "The endpoint already applied the label mapping and confidence threshold. Anything unexpected escalates.",
+      "Choices": [
+        {
+          "Condition": "{% $action.name = 'bedrock_reply' %}",
+          "Next": "DraftReplyWithBedrock"
+        }
+      ],
+      "Default": "EscalateViaSnsEmail"
+    },
+    "EscalateViaSnsEmail": {
+      "Type": "Task",
+      "Comment": "Only metadata goes into the email; the message itself stays in the execution history.",
+      "Resource": "arn:aws:states:::sns:publish",
+      "Arguments": {
+        "TopicArn": "${TopicArn}",
+        "Subject": "Laya: message escalated for human review",
+        "Message": "{% 'A message needs human review.\n\nExecution: ' & $states.context.Execution.Id & '\nAction: ' & $action.name & '\nReason: ' & $action.reason & '\n\nOpen the execution in the Step Functions console to see the original message.' %}"
+      },
+      "Output": {
+        "action": "{% $action %}",
+        "snsMessageId": "{% $states.result.MessageId %}"
+      },
+      "End": true
+    },
+    "DraftReplyWithBedrock": {
+      "Type": "Task",
+      "Comment": "SDK integration: Bedrock Runtime Converse (model-agnostic request shape).",
+      "Resource": "arn:aws:states:::aws-sdk:bedrockruntime:converse",
+      "Arguments": {
+        "ModelId": "${BedrockModelId}",
+        "System": [
+          {
+            "Text": "You are the customer support assistant for our website. Write the reply that will be sent to the customer, and actually answer their question.\n\nRules:\n- Give a real, concrete answer. Use your general knowledge freely: explain concepts, summarise well-known books or topics, give step-by-step instructions for common tasks.\n- You have NO access to this company's data. Never state company-specific facts: order or account details, prices, delivery dates, stock, return windows, refund rules or any other policy. Do not guess typical values (e.g. '30 days'). For such questions, say you don't have that information to hand and that a colleague will confirm it.\n- If the message is too vague to answer fully, give the most useful answer you can, then ask ONE specific follow-up question (for example, the book title).\n- Reply in the customer's language. Keep it under 200 words. Plain text only: no Markdown, headings, bold or bullet symbols.\n- Sign off as 'Customer Support'. Never use placeholders such as [Your Name]."
+          }
+        ],
+        "Messages": [
+          {
+            "Role": "user",
+            "Content": [
+              {
+                "Text": "{% 'Customer message:\n' & ($type($message) = 'string' ? $message : ($exists($message.body) ? (($exists($message.subject) ? 'Subject: ' & $message.subject & '\n\n' : '') & $message.body) : $string($message))) %}"
+              }
+            ]
+          }
+        ],
+        "InferenceConfig": {
+          "MaxTokens": 700,
+          "Temperature": 0.2
+        }
+      },
+      "Retry": [
+        {
+          "ErrorEquals": ["States.TaskFailed"],
+          "IntervalSeconds": 2,
+          "MaxAttempts": 2,
+          "BackoffRate": 2,
+          "JitterStrategy": "FULL"
+        }
+      ],
+      "Output": {
+        "action": "{% $action %}",
+        "reply": "{% $states.result.Output.Message.Content[0].Text %}"
+      },
+      "End": true
+    }
+  }
+}

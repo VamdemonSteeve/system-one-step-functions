@@ -1,0 +1,28 @@
+{
+  "app": "python3 app.py",
+  "watch": {
+    "include": ["**"],
+    "exclude": ["README.md", "cdk*.json", "**/__pycache__", ".venv", "tests"]
+  },
+  "context": {
+    "laya": {
+      "endpointName": "laya-serverless",
+      "memorySizeInMb": 6144,
+      "maxConcurrency": 5,
+      "provisionedConcurrency": 0,
+      "layaSubfolder": "",
+      "bedrockModelId": "eu.anthropic.claude-haiku-4-5-20251001-v1:0",
+      "confidenceThreshold": 0.5,
+      "notificationEmail": ""
+    },
+    "strandsDecider": {
+      "endpointName": "strands-decider-serverless",
+      "memorySizeInMb": 6144,
+      "maxConcurrency": 2,
+      "provisionedConcurrency": 0,
+      "checkpointRepo": "StrandsAgents/strands-decider-2B-hobson-v19"
+    },
+    "@aws-cdk/aws-iam:minimizePolicies": true,
+    "@aws-cdk/core:target-partitions": ["aws"]
+  }
+}
